@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added `ui.pane_borders = "minimal"` to use thin divider lines between split panes instead of boxed borders, with no focus highlight or navigate-mode dimming.
+
 ### Fixed
 - Local Herdr clients no longer treat raw `Ctrl+V` as a clipboard-image paste trigger, so pane apps such as Vim and Neovim receive block-visual `Ctrl+V` even when the desktop clipboard contains an image. `herdr --remote` keeps `keys.remote_image_paste = "ctrl+v"` by default. (#647)
 - Herdr now refreshes cached host terminal colors when terminals report a light/dark color-scheme change, so pane apps that query OSC 10/11 no longer need detach/attach to see updated default colors. Opt-in `[theme].auto_switch` can also switch Herdr's own UI between configured `dark_name` and `light_name` themes. (#675)

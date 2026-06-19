@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Direction, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
@@ -10,7 +10,8 @@ use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
-use crate::layout::PaneInfo;
+use crate::config::PaneBordersConfig;
+use crate::layout::{PaneInfo, SplitBorder};
 use crate::terminal::{TerminalRuntime, TerminalRuntimeRegistry};
 
 pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
@@ -55,11 +56,61 @@ fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
     )
 }
 
-fn pane_inner_rect(area: Rect, framed: bool) -> Rect {
-    if framed {
-        Block::default().borders(Borders::ALL).inner(area)
+fn uses_boxed_pane_borders(app: &AppState, multi_pane: bool) -> bool {
+    multi_pane && app.pane_borders == PaneBordersConfig::Boxed
+}
+
+fn pane_overlaps_split_area(pane_rect: Rect, split: &SplitBorder) -> bool {
+    pane_rect.x < split.area.x.saturating_add(split.area.width)
+        && pane_rect.x.saturating_add(pane_rect.width) > split.area.x
+        && pane_rect.y < split.area.y.saturating_add(split.area.height)
+        && pane_rect.y.saturating_add(pane_rect.height) > split.area.y
+}
+
+fn minimal_pane_content_rect(mut rect: Rect, splits: &[SplitBorder]) -> Rect {
+    for split in splits {
+        if !pane_overlaps_split_area(rect, split) {
+            continue;
+        }
+        match split.direction {
+            Direction::Horizontal => {
+                if rect.x == split.pos {
+                    rect.x = rect.x.saturating_add(1);
+                    rect.width = rect.width.saturating_sub(1);
+                }
+            }
+            Direction::Vertical => {
+                if rect.y == split.pos {
+                    rect.y = rect.y.saturating_add(1);
+                    rect.height = rect.height.saturating_sub(1);
+                }
+            }
+        }
+    }
+    rect
+}
+
+fn pane_content_rect(
+    app: &AppState,
+    multi_pane: bool,
+    pane_rect: Rect,
+    splits: &[SplitBorder],
+    focused_and_terminal_active: bool,
+) -> Rect {
+    if uses_boxed_pane_borders(app, multi_pane) {
+        let border_set = if focused_and_terminal_active {
+            ratatui::symbols::border::THICK
+        } else {
+            ratatui::symbols::border::PLAIN
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border_set);
+        block.inner(pane_rect)
+    } else if multi_pane && app.pane_borders == PaneBordersConfig::Minimal {
+        minimal_pane_content_rect(pane_rect, splits)
     } else {
-        area
+        pane_rect
     }
 }
 
@@ -106,11 +157,18 @@ pub(super) fn resize_tab_panes(
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
     let multi_pane = tab.layout.pane_count() > 1;
+    let splits = tab.layout.splits(area);
 
     if tab.zoomed {
         let focused_id = tab.layout.focused();
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, focused_id) {
-            let pane_inner = pane_inner_rect(area, multi_pane);
+            let pane_inner = pane_content_rect(
+                app,
+                multi_pane,
+                area,
+                &splits,
+                true,
+            );
             let inner_rect = stable_terminal_inner_rect(pane_inner);
             if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
@@ -125,11 +183,13 @@ pub(super) fn resize_tab_panes(
     }
 
     for info in tab.layout.panes(area) {
-        let pane_inner = if multi_pane {
-            Block::default().borders(Borders::ALL).inner(info.rect)
-        } else {
-            area
-        };
+        let pane_inner = pane_content_rect(
+            app,
+            multi_pane,
+            info.rect,
+            &splits,
+            info.is_focused,
+        );
 
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, info.id) {
             let inner_rect = stable_terminal_inner_rect(pane_inner);
@@ -152,6 +212,7 @@ pub(super) fn compute_pane_infos(
     area: Rect,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
+    split_borders: &[SplitBorder],
 ) -> Vec<PaneInfo> {
     let Some(ws_idx) = app.active else {
         return Vec::new();
@@ -165,7 +226,7 @@ pub(super) fn compute_pane_infos(
 
     if ws.zoomed {
         let focused_id = ws.layout.focused();
-        let pane_inner = pane_inner_rect(area, multi_pane);
+        let pane_inner = pane_content_rect(app, multi_pane, area, split_borders, true);
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
@@ -195,19 +256,13 @@ pub(super) fn compute_pane_infos(
     let mut pane_infos = ws.layout.panes(area);
 
     for info in &mut pane_infos {
-        let pane_inner = if multi_pane {
-            let border_set = if info.is_focused && terminal_active {
-                ratatui::symbols::border::THICK
-            } else {
-                ratatui::symbols::border::PLAIN
-            };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_set(border_set);
-            block.inner(info.rect)
-        } else {
-            area
-        };
+        let pane_inner = pane_content_rect(
+            app,
+            multi_pane,
+            info.rect,
+            split_borders,
+            info.is_focused && terminal_active,
+        );
 
         let mut inner_rect = pane_inner;
         let mut scrollbar_rect = None;
@@ -254,7 +309,7 @@ pub(super) fn render_panes(
 
     for info in &app.view.pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
-            if multi_pane {
+            if uses_boxed_pane_borders(app, multi_pane) {
                 let (border_style, border_set) = if info.is_focused && terminal_active {
                     (
                         Style::default().fg(app.palette.accent),
@@ -296,7 +351,10 @@ pub(super) fn render_panes(
             rt.render(frame, info.inner_rect, show_cursor);
             render_pane_scrollbar(app, frame, info, rt);
 
-            let should_dim = !info.is_focused && multi_pane && !terminal_active;
+            let should_dim = app.pane_borders == PaneBordersConfig::Boxed
+                && !info.is_focused
+                && multi_pane
+                && !terminal_active;
             if should_dim {
                 let inner = info.inner_rect;
                 let buf = frame.buffer_mut();
@@ -318,6 +376,37 @@ pub(super) fn render_panes(
                 app.host_terminal_theme,
             );
             render_copy_mode_cursor(app, frame, info);
+        }
+    }
+
+    render_pane_dividers(app, frame, multi_pane);
+}
+
+fn render_pane_dividers(app: &AppState, frame: &mut Frame, multi_pane: bool) {
+    if !multi_pane || app.pane_borders != PaneBordersConfig::Minimal {
+        return;
+    }
+
+    let style = Style::default().fg(app.palette.surface_dim);
+    let buf = frame.buffer_mut();
+    for split in &app.view.split_borders {
+        match split.direction {
+            Direction::Horizontal => {
+                let x = split.pos;
+                for y in split.area.y..split.area.y.saturating_add(split.area.height) {
+                    let cell = &mut buf[(x, y)];
+                    cell.set_symbol("│");
+                    cell.set_style(style);
+                }
+            }
+            Direction::Vertical => {
+                let y = split.pos;
+                for x in split.area.x..split.area.x.saturating_add(split.area.width) {
+                    let cell = &mut buf[(x, y)];
+                    cell.set_symbol("─");
+                    cell.set_style(style);
+                }
+            }
         }
     }
 }
@@ -547,6 +636,7 @@ mod tests {
             area,
             false,
             crate::kitty_graphics::HostCellSize::default(),
+            &[],
         );
         let info = &infos[0];
 
@@ -576,12 +666,63 @@ mod tests {
             area,
             false,
             crate::kitty_graphics::HostCellSize::default(),
+            &[],
         );
         let info = &infos[0];
 
         assert_eq!(info.rect, area);
         assert_eq!(info.scrollbar_rect, None);
         assert_eq!(info.inner_rect, Rect::new(10, 3, 39, 8));
+    }
+
+    #[test]
+    fn minimal_pane_content_rect_reserves_divider_column() {
+        let area = Rect::new(10, 3, 40, 8);
+        let mut workspace = Workspace::test_new("test");
+        let _right = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let splits = workspace.tabs[0].layout.splits(area);
+        let panes = workspace.tabs[0].layout.panes(area);
+        assert_eq!(panes.len(), 2);
+
+        let left = minimal_pane_content_rect(panes[0].rect, &splits);
+        let right = minimal_pane_content_rect(panes[1].rect, &splits);
+
+        assert_eq!(left, panes[0].rect);
+        assert_eq!(right.x, panes[1].rect.x + 1);
+        assert_eq!(right.width, panes[1].rect.width - 1);
+    }
+
+    #[tokio::test]
+    async fn minimal_pane_borders_use_full_height_without_box_inset() {
+        let mut app = AppState::test_new();
+        app.pane_borders = PaneBordersConfig::Minimal;
+        let mut workspace = Workspace::test_new("test");
+        let right = workspace.test_split(ratatui::layout::Direction::Vertical);
+        workspace.tabs[0].runtimes.insert(
+            right,
+            TerminalRuntime::test_with_scrollback_bytes(40, 8, 1024, b"ready\n"),
+        );
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+
+        let area = Rect::new(10, 3, 40, 8);
+        let splits = app.workspaces[0].tabs[0].layout.splits(area);
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let infos = compute_pane_infos(
+            &app,
+            &terminal_runtimes,
+            area,
+            false,
+            crate::kitty_graphics::HostCellSize::default(),
+            &splits,
+        );
+
+        let bottom = infos.iter().find(|info| info.id == right).expect("bottom pane");
+        assert_eq!(bottom.inner_rect.y, area.y + area.height / 2 + 1);
+        assert_eq!(
+            bottom.inner_rect.height,
+            area.height.saturating_sub(area.height / 2).saturating_sub(1)
+        );
     }
 
     #[tokio::test]
@@ -605,6 +746,7 @@ mod tests {
             area,
             false,
             crate::kitty_graphics::HostCellSize::default(),
+            &[],
         );
         let info = &infos[0];
 
@@ -634,6 +776,7 @@ mod tests {
             area,
             false,
             crate::kitty_graphics::HostCellSize::default(),
+            &[],
         );
         let info = &infos[0];
 
@@ -667,6 +810,7 @@ mod tests {
             area,
             false,
             crate::kitty_graphics::HostCellSize::default(),
+            &[],
         );
         let info = &infos[0];
 

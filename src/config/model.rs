@@ -103,6 +103,25 @@ impl AgentPanelSortConfig {
     }
 }
 
+/// Split-pane chrome style. `boxed` draws a border around each pane and
+/// highlights the focused pane. `minimal` uses thin divider lines only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PaneBordersConfig {
+    #[default]
+    Boxed,
+    Minimal,
+}
+
+impl PaneBordersConfig {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Boxed => "boxed",
+            Self::Minimal => "minimal",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RightClickPassthroughModifierConfig(Option<KeyModifiers>);
 
@@ -446,6 +465,8 @@ pub struct UiConfig {
     pub prompt_new_tab_name: bool,
     /// Show agent labels in split pane borders when no manual pane label is set. Default: false.
     pub show_agent_labels_on_pane_borders: bool,
+    /// Split-pane border style. `boxed` (default) or `minimal` (thin dividers, no focus chrome).
+    pub pane_borders: PaneBordersConfig,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
     /// Accent color for highlights, borders, and navigation UI.
@@ -633,6 +654,7 @@ impl Default for UiConfig {
             confirm_close: true,
             prompt_new_tab_name: true,
             show_agent_labels_on_pane_borders: false,
+            pane_borders: PaneBordersConfig::Boxed,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             accent: "cyan".into(),
             toast: ToastConfig::default(),
@@ -836,6 +858,24 @@ agent_panel_scope = "current"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Spaces);
+    }
+
+    #[test]
+    fn pane_borders_default_boxed_and_parse() {
+        let default_config = Config::default();
+        assert_eq!(
+            default_config.ui.pane_borders,
+            PaneBordersConfig::Boxed
+        );
+
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+pane_borders = "minimal"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.ui.pane_borders, PaneBordersConfig::Minimal);
     }
 
     #[test]
